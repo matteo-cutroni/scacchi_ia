@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 import os
 import chess.pgn
+import numpy as np
 from state import State
 
 def get_dataset(num_samples = None):
@@ -27,7 +28,10 @@ def get_dataset(num_samples = None):
             if num_samples is not None and len(X) > num_samples:
                 return X,Y
             gn+=1
+    X = np.array(X)
+    Y = np.array(Y)
     return X,Y
 
 if __name__ == "__main__":
-    X, Y = get_dataset(10000)
+    X, Y = get_dataset()
+    np.savez("processed/dataset_full.npz", X, Y)
