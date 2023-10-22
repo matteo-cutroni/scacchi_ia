@@ -1,12 +1,14 @@
 #!/usr/bin/python3
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import optim
 import numpy as np
 
 class ChessValueDataset(Dataset):
     def __init__(self):
-        data = np.load("processed/dataset_2M.npz")
+        data = np.load("processed/dataset_10k.npz")
         self.X = data['arr_0']
         self.Y = data['arr_1']
         print("loaded", self.X.shape, self.Y.shape)
@@ -19,8 +21,6 @@ class ChessValueDataset(Dataset):
     def __getitem__(self, idx):
         return (self.X[idx], self.Y[idx])
 
-
-chess_dataset = ChessValueDataset()
 
 class Net(nn.Module):
   def __init__(self):
@@ -68,3 +68,46 @@ class Net(nn.Module):
 
     # value output
     return F.tanh(x)
+  
+if __name__ == "__main__":
+    if torch.cuda.is_available():
+      device = torch.device('cuda')
+      torch.cuda.set_device(0)
+    else:
+      device = torch.device('cpu')
+
+    print('Using PyTorch version:', torch.__version__, ' Device:', device)
+
+    chess_dataset = ChessValueDataset()
+    train_loader = DataLoader(chess_dataset, batch_size=256, shuffle=True)
+    model = Net()
+    model.to(device)
+    optimizer = optim.Adam(model.parameters())
+    floss = nn.MSELoss()
+
+    
+    model.train()
+
+    for epoch in range(100):
+      all_loss = 0
+      num_loss = 0
+
+      for batch_idx, (data, target) in enumerate(train_loader):
+        target = target.unsqueeze(-1)
+        data, target = data.to(device), target.to(device)
+        data = data.float()
+        target = target.float()
+
+        optimizer.zero_grad()
+        output = model(data)
+
+        loss = floss(output, target)
+        loss.backward()
+        optimizer.step()
+
+        all_loss += loss.item()
+        num_loss += 1
+
+      print(f"{epoch}: {all_loss/num_loss}")
+
+      torch.save(model.state_dict(), "nets/value_net_10k.pth")

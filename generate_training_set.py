@@ -7,6 +7,7 @@ from state import State
 def get_dataset(num_samples = None):
     X, Y = [], []
 
+    values = {"1/2-1/2":0,"0-1":-1, "1-0":1, "*":0}
     gn = 0
     for fn in os.listdir("data"):
         pgn = open(os.path.join("data",fn))
@@ -16,11 +17,14 @@ def get_dataset(num_samples = None):
                 game = chess.pgn.read_game(pgn)
             except Exception:
                 break
-            value = {"1/2-1/2":0,"0-1":-1, "1-0":1, "*":0}[game.headers["Result"]]
+            res = game.headers["Result"]
+            if res not in values:
+                continue
+            value = values[res]
             board = game.board()
             for i, move in enumerate(game.mainline_moves()):
                 board.push(move)
-                ser = State(board).serialize()[:,:,0]
+                ser = State(board).serialize()
                 X.append(ser)
                 Y.append(value)
             print(f"parsing game {gn}, got {len(X)} examples")
@@ -33,5 +37,5 @@ def get_dataset(num_samples = None):
     return X,Y
 
 if __name__ == "__main__":
-    X, Y = get_dataset()
-    np.savez("processed/dataset_full.npz", X, Y)
+    X, Y = get_dataset(2000000)
+    np.savez("processed/dataset_2M.npz", X, Y)
