@@ -8,7 +8,7 @@ import numpy as np
 
 class ChessValueDataset(Dataset):
     def __init__(self):
-        data = np.load("processed/dataset_10k.npz")
+        data = np.load("processed/dataset_2M.npz")
         self.X = data['arr_0']
         self.Y = data['arr_1']
         print("loaded", self.X.shape, self.Y.shape)
@@ -110,4 +110,4 @@ if __name__ == "__main__":
 
       print(f"{epoch}: {all_loss/num_loss}")
 
-      torch.save(model.state_dict(), "nets/value_net_10k.pth")
+      torch.save(model.state_dict(), "nets/value_net_2M.pth")

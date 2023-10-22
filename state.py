@@ -3,11 +3,11 @@ import chess
 import numpy as np
 
 class State:
-    def __init__(self, Board):
-        if Board is None:
+    def __init__(self, board=None):
+        if board is None:
             self.board = chess.Board()
         else:
-            self.board = Board
+            self.board = board
 
     def serialize(self):
         assert self.board.is_valid()
