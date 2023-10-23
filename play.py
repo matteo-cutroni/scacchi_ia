@@ -3,10 +3,13 @@ import torch
 from state import State
 from train import Net
 import chess.svg
+import base64
+import traceback
+
 
 class Valuator():
     def __init__(self):
-        vals = torch.load("nets/value_net_10k.pth", map_location=lambda storage, loc: storage)
+        vals = torch.load("nets/value_net_2M.pth", map_location=lambda storage, loc: storage)
         self.model = Net()
         self.model.load_state_dict(vals)
 
@@ -24,6 +27,10 @@ def explore_leaves(s, v):
 
 s = State()
 v = Valuator()
+
+def to_svg(s):
+  return base64.b64encode(chess.svg.board(board=s.board).encode('utf-8')).decode('utf-8')
+
 
 def computer_move(s, v):
     move = sorted(explore_leaves(s, v), key= lambda x:x[0], reverse=s.board.turn)
@@ -43,7 +50,7 @@ app = Flask(__name__)
 @app.route('/')
 def hello():
     ret = open('index.html').read()
-    return ret
+    return ret.replace('start', s.board.fen())
 
 @app.route('/move')
 def move():
@@ -60,6 +67,59 @@ def move():
 @app.route('/board.svg')
 def board():
     return Response(chess.svg.board(board = s.board), mimetype="img+xml")
+
+@app.route('/selfplay')
+def selfplay():
+    ret = "<html> <head>"
+    s = State()
+    while not s.board.is_game_over():
+        l = sorted(explore_leaves(s, v), key= lambda x:x[0], reverse=s.board.turn)
+        move = l[0]
+        print(move)
+        s.board.push(move[1])
+        ret += '<img width=600 height=600 src="data:image/svg+xml;base64,%s"></img><br/>' % to_svg(s)
+    print(s.board.result())
+    return ret
+
+
+@app.route("/newgame")
+def newgame():
+  s.board.reset()
+  response = app.response_class(
+    response=s.board.fen(),
+    status=200
+  )
+  return response
+
+# moves given as coordinates of piece moved
+@app.route("/move_coordinates")
+def move_coordinates():
+  if not s.board.is_game_over():
+    source = int(request.args.get('from', default=''))
+    target = int(request.args.get('to', default=''))
+    promotion = True if request.args.get('promotion', default='') == 'true' else False
+
+    move = s.board.san(chess.Move(source, target, promotion=chess.QUEEN if promotion else None))
+
+    if move is not None and move != "":
+      print("human moves", move)
+      try:
+        s.board.push_san(move)
+        computer_move(s, v)
+      except Exception:
+        traceback.print_exc()
+    response = app.response_class(
+      response=s.board.fen(),
+      status=200
+    )
+    return response
+
+  print("GAME IS OVER")
+  response = app.response_class(
+    response="game over",
+    status=200
+  )
+  return response
 
 
 if __name__ == "__main__":

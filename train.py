@@ -79,7 +79,7 @@ if __name__ == "__main__":
     print('Using PyTorch version:', torch.__version__, ' Device:', device)
 
     chess_dataset = ChessValueDataset()
-    train_loader = DataLoader(chess_dataset, batch_size=256, shuffle=True)
+    train_loader = DataLoader(chess_dataset, batch_size=1024, shuffle=True)
     model = Net()
     model.to(device)
     optimizer = optim.Adam(model.parameters())
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     
     model.train()
 
-    for epoch in range(100):
+    for epoch in range(50):
       all_loss = 0
       num_loss = 0
 
