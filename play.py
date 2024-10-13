@@ -16,6 +16,45 @@ class Valuator():
     def __call__(self, s):
         brd = s.serialize()
         return self.model(torch.tensor(brd).float()).item()
+    
+MAXVAL = 10000
+class ClassicValuator():
+    values = {chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 0}
+
+    def __init__(self):
+        pass
+
+    def __call__(self, s):
+        val = self.value(s)
+        return val
+
+
+    def value(self, s):
+        b = s.board
+        # game over values
+        if b.is_game_over():
+            if b.result() == "1-0":
+                return MAXVAL
+            elif b.result() == "0-1":
+                return -MAXVAL
+            else:
+                return 0
+
+        val = 0.0
+        # piece values
+        pm = s.board.piece_map()
+        for x in pm:
+            tval = self.values[pm[x].piece_type]
+            if pm[x].color == chess.WHITE:
+                val += tval
+            else:
+                val -= tval
+        return val
 
 def explore_leaves(s, v):
     ret = []
@@ -27,9 +66,15 @@ def explore_leaves(s, v):
 
 s = State()
 v = Valuator()
+#v = ClassicValuator()
 
 def to_svg(s):
   return base64.b64encode(chess.svg.board(board=s.board).encode('utf-8')).decode('utf-8')
+
+
+def computer_minimax(s, v, depth):
+    if depth == 0 or s.is_game_over():
+        return v(s)
 
 
 def computer_move(s, v):
