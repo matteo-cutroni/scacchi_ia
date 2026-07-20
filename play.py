@@ -16,45 +16,6 @@ class Valuator():
     def __call__(self, s):
         brd = s.serialize()
         return self.model(torch.tensor(brd).float()).item()
-    
-MAXVAL = 10000
-class ClassicValuator():
-    values = {chess.PAWN: 1,
-            chess.KNIGHT: 3,
-            chess.BISHOP: 3,
-            chess.ROOK: 5,
-            chess.QUEEN: 9,
-            chess.KING: 0}
-
-    def __init__(self):
-        pass
-
-    def __call__(self, s):
-        val = self.value(s)
-        return val
-
-
-    def value(self, s):
-        b = s.board
-        # game over values
-        if b.is_game_over():
-            if b.result() == "1-0":
-                return MAXVAL
-            elif b.result() == "0-1":
-                return -MAXVAL
-            else:
-                return 0
-
-        val = 0.0
-        # piece values
-        pm = s.board.piece_map()
-        for x in pm:
-            tval = self.values[pm[x].piece_type]
-            if pm[x].color == chess.WHITE:
-                val += tval
-            else:
-                val -= tval
-        return val
 
 def explore_leaves(s, v):
     ret = []
@@ -66,15 +27,9 @@ def explore_leaves(s, v):
 
 s = State()
 v = Valuator()
-#v = ClassicValuator()
 
 def to_svg(s):
   return base64.b64encode(chess.svg.board(board=s.board).encode('utf-8')).decode('utf-8')
-
-
-def computer_minimax(s, v, depth):
-    if depth == 0 or s.is_game_over():
-        return v(s)
 
 
 def computer_move(s, v):
@@ -89,42 +44,13 @@ def computer_move(s, v):
     s.board.push(move[0][1])
 
 
-from flask import Flask, Response, request
+from flask import Flask, Response, request, jsonify
 app = Flask(__name__)
 
 @app.route('/')
 def hello():
     ret = open('index.html').read()
     return ret.replace('start', s.board.fen())
-
-@app.route('/move')
-def move():
-    if not s.board.is_game_over():
-        move = request.args.get('move', default="")
-        if move is not None and move != "":
-            print("io scelgo= ", move)
-            s.board.push_san(move)
-        computer_move(s,v)
-    else:
-        print("GAME IS OVER!")
-    return hello()
-
-@app.route('/board.svg')
-def board():
-    return Response(chess.svg.board(board = s.board), mimetype="img+xml")
-
-@app.route('/selfplay')
-def selfplay():
-    ret = "<html> <head>"
-    s = State()
-    while not s.board.is_game_over():
-        l = sorted(explore_leaves(s, v), key= lambda x:x[0], reverse=s.board.turn)
-        move = l[0]
-        print(move)
-        s.board.push(move[1])
-        ret += '<img width=600 height=600 src="data:image/svg+xml;base64,%s"></img><br/>' % to_svg(s)
-    print(s.board.result())
-    return ret
 
 
 @app.route("/newgame")
@@ -135,6 +61,21 @@ def newgame():
     status=200
   )
   return response
+
+# Helper to get a clear Italian game-over reason
+def get_game_result(board):
+    if not board.is_game_over():
+        return ""
+    if board.is_checkmate():
+        winner = "il Nero" if board.turn == chess.WHITE else "il Bianco"
+        return f"Scacco Matto! Vince {winner}."
+    if board.is_stalemate():
+        return "Patta (Stallo)."
+    if board.is_insufficient_material():
+        return "Patta (Materiale Insufficiente)."
+    if board.can_claim_draw():
+        return "Patta (Ripetizione o 50 mosse)."
+    return "Partita Terminata (Patta)."
 
 # moves given as coordinates of piece moved
 @app.route("/move_coordinates")
@@ -153,28 +94,22 @@ def move_coordinates():
         computer_move(s, v)
       except Exception:
         traceback.print_exc()
-    response = app.response_class(
-      response=s.board.fen(),
-      status=200
-    )
-    return response
+        
+    return jsonify({
+      "fen": s.board.fen(),
+      "eval": v(s),
+      "game_over": s.board.is_game_over(),
+      "result_text": get_game_result(s.board)
+    })
 
   print("GAME IS OVER")
-  response = app.response_class(
-    response="game over",
-    status=200
-  )
-  return response
+  return jsonify({
+    "fen": s.board.fen(),
+    "eval": v(s),
+    "game_over": True,
+    "result_text": get_game_result(s.board)
+  })
 
 
 if __name__ == "__main__":
     app.run(debug=True)
-# if __name__ == "__main__":
-#     s = State()
-#     v = Valuator()
-#     while not s.board.is_game_over():
-#         l = sorted(explore_leaves(s, v), key= lambda x:x[0], reverse=s.board.turn)
-#         move = l[0]
-#         print(move)
-#         s.board.push(move[1])
-#     print(s.board.result())

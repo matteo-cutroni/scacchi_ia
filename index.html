@@ -1,26 +1,100 @@
 <!doctype html>
 <html>
 <head>
+  <title>Scacchi AI</title>
+  
+  <!-- Chessboard2 Modern CSS tramite CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@chrisoakman/chessboard2@0.5.0/dist/chessboard2.min.css">
+  <!-- Chessboard2 Modern JS tramite CDN  -->
+  <script src="https://cdn.jsdelivr.net/npm/@chrisoakman/chessboard2@0.5.0/dist/chessboard2.min.js"></script>
 
-<title>scacchi</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f0f0f0;
+      margin: 40px;
+    }
+    .controls {
+      margin-bottom: 20px;
+    }
+    button {
+      padding: 10px 18px;
+      font-size: 16px;
+      font-weight: bold;
+      background-color: #4a90e2;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    button:hover {
+      background-color: #357abd;
+    }
+    
+    .game-container {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    
+    .eval-bar-wrapper {
+      width: 24px;
+      height: 600px;
+      background-color: #312e2b;
+      border-radius: 4px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: inset 0 0 6px rgba(0,0,0,0.6);
+    }
+    .eval-fill {
+      width: 100%;
+      transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    #eval-black {
+      background-color: #262421;
+      height: 50%;
+    }
+    #eval-white {
+      background-color: #ffffff;
+      height: 50%;
+    }
 
-<link rel="stylesheet" type="text/css" href="static/chessboard.min.css">
-
-<script src="static/jquery.min.js"></script>
-<script src="static/chessboard.min.js"></script>
-
+    #game-status {
+      margin-top: 20px;
+      padding: 15px;
+      width: 570px;
+      background-color: #e74c3c;
+      color: white;
+      font-size: 22px;
+      font-weight: bold;
+      text-align: center;
+      border-radius: 6px;
+      display: none;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.15);
+    }
+  </style>
 </head>
-<body style="font-size: 20px;">
+<body>
 
-<a href="/selfplay">AI vs AI</a>
-<button onclick="newGame()">Nuova Partita</button><br/>
-<div id="board" style="width: 600px"></div>
-<p></p>
+<div class="controls">
+  <button onclick="newGame()">Nuova Partita</button>
+</div>
 
+<div class="game-container">
+  <div class="eval-bar-wrapper">
+    <div id="eval-black" class="eval-fill"></div>
+    <div id="eval-white" class="eval-fill"></div>
+  </div>
+
+  <div id="board" style="width: 600px"></div>
+</div>
+
+<div id="game-status">Partita Terminata! (Game Over)</div>
 
 <script type="text/javascript">
-
-var board = ChessBoard('board', {
+var board = Chessboard2('board', {
   position: 'start',
   draggable: true,
   onDrop: onDrop
@@ -28,30 +102,59 @@ var board = ChessBoard('board', {
 
 var files = {"a": 0, "b": 1, "c": 2, "d": 3, "e": 4, "f": 5, "g": 6, "h": 7};
 function get_square(sq) {
-  return 8*(parseInt(sq.charAt(1)) - 1) + files[sq.charAt(0)];
+  return 8 * (parseInt(sq.charAt(1)) - 1) + files[sq.charAt(0)];
 }
 
+function updateEvalBar(evalScore) {
+  let whitePercent = ((evalScore + 1.0) / 2.0) * 100.0;
+  whitePercent = Math.max(5, Math.min(95, whitePercent));
+  let blackPercent = 100.0 - whitePercent;
 
-function onDrop(source, target, piece) {
-  if(source == target) return
+  document.getElementById("eval-white").style.height = whitePercent + "%";
+  document.getElementById("eval-black").style.height = blackPercent + "%";
+}
 
-  var promotion = piece.toLowerCase().charAt(1) == 'p' && parseInt(target.charAt(1)) == 8;
+function onDrop(data) {
+  var source = data.source;
+  var target = data.target;
+  var piece = data.piece;
 
-  $.get('/move_coordinates', {'from': get_square(source), 'to': get_square(target), 'promotion': promotion}, function(r) {
-    if (r.includes("game over")) {
-      document.querySelector('p').innerText = 'game over';
-    } else {
-      document.querySelector('p').innerText = '';
-      board.position(r);
-    }
-  });
+  if (source === target) return;
+
+  var promotion = piece.toLowerCase().charAt(1) === 'p' && parseInt(target.charAt(1)) === 8;
+
+  var url = new URL(window.location.origin + '/move_coordinates');
+  url.searchParams.append('from', get_square(source));
+  url.searchParams.append('to', get_square(target));
+  url.searchParams.append('promotion', promotion);
+
+  fetch(url)
+    .then(response => response.json())
+    .then(serverData => {
+      board.position(serverData.fen);
+      
+      if (serverData.eval !== undefined) {
+        updateEvalBar(serverData.eval);
+      }
+      
+      if (serverData.game_over) {
+        var statusDiv = document.getElementById('game-status');
+        statusDiv.innerText = serverData.result_text || "Partita Terminata!";
+        statusDiv.style.display = 'block';
+      } else {
+        document.getElementById('game-status').style.display = 'none';
+      }
+    })
+    .catch(err => console.error("Errore durante la mossa:", err));
 }
 
 function newGame() {
-  $.get('/newgame', function(r) {
-    document.querySelector('p').innerText = '';
-    board.position(r);
-  });
+  fetch('/newgame')
+    .then(() => {
+      board.position('start');
+      updateEvalBar(0.0);
+      document.getElementById('game-status').style.display = 'none';
+    });
 }
 </script>
 
