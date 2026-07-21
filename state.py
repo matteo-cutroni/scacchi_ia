@@ -1,6 +1,6 @@
-#!/usr/bin/python3
 import chess
 import numpy as np
+import torch
 
 class State:
     def __init__(self, board=None):
@@ -10,45 +10,55 @@ class State:
             self.board = board
 
     def serialize(self):
-        assert self.board.is_valid()
-        bstate = np.zeros(64, np.uint8)
+        """
+        Trasforma la scacchiera in un tensore 3D di forma (18, 8, 8)
+        pronto per essere consumato dalla ResNet.
+        """
+        # Inizializziamo una matrice di zeri 18x8x8
+        bstate = np.zeros((18, 8, 8), dtype=np.float32)
+        
+        # Mappatura dei pezzi per indice del canale
+        piece_map = {
+            chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
+            chess.ROOK: 3, chess.QUEEN: 4, chess.KING: 5
+        }
+        
+        # 1. Posizionamento dei pezzi (Canali 0-11)
         for i in range(64):
-            pp = self.board.piece_at(i)
-            if pp is not None:
-                bstate[i] = {"P":1, "N":2, "B":3, "R":4, "Q":5, "K":6, \
-                             "p":9, "n":10, "b":11, "r":12, "q":13, "k":14}[pp.symbol()]
-        if self.board.has_queenside_castling_rights(chess.WHITE):
-            assert bstate[0] == 4
-            bstate[0] = 7
+            piece = self.board.piece_at(i)
+            if piece is not None:
+                # Coordinate sulla griglia 8x8
+                row, col = i // 8, i % 8
+                idx = piece_map[piece.piece_type]
+                
+                # Se il pezzo è nero, lo mettiamo nei canali 6-11
+                if piece.color == chess.BLACK:
+                    idx += 6
+                
+                bstate[idx, row, col] = 1.0
+
+        # 2. Turno di gioco (Canale 12)
+        if self.board.turn == chess.WHITE:
+            bstate[12, :, :] = 1.0
+            
+        # 3. Diritti di Arrocco (Canali 13-16)
         if self.board.has_kingside_castling_rights(chess.WHITE):
-            assert bstate[7] == 4
-            bstate[7] = 7
-        if self.board.has_queenside_castling_rights(chess.BLACK):
-            assert bstate[56] == 12
-            bstate[56] = 8+7
+            bstate[13, :, :] = 1.0
+        if self.board.has_queenside_castling_rights(chess.WHITE):
+            bstate[14, :, :] = 1.0
         if self.board.has_kingside_castling_rights(chess.BLACK):
-            assert bstate[63] == 12
-            bstate[63] = 8+7
-
+            bstate[15, :, :] = 1.0
+        if self.board.has_queenside_castling_rights(chess.BLACK):
+            bstate[16, :, :] = 1.0
+            
+        # 4. En Passant (Canale 17)
         if self.board.ep_square is not None:
-            assert bstate[self.board.ep_square] == 0
-            bstate[self.board.ep_square] = 8
-        
-        bstate = bstate.reshape(8,8)
-        
-        #trasforma stato in binario
-        state = np.zeros((5,8,8), np.uint8)
+            row, col = self.board.ep_square // 8, self.board.ep_square % 8
+            bstate[17, row, col] = 1.0
+            
+        return bstate
 
-        # 0-3 columns to binary
-        state[0] = (bstate>>3)&1
-        state[1] = (bstate>>2)&1
-        state[2] = (bstate>>1)&1
-        state[3] = (bstate>>0)&1
-
-        # 4th column is who's turn it is
-        state[:,:,4] = self.board.turn*1.0
-        
-        return state
-
-    def edges(self):
-        return list(self.board.legal_moves)
+    def to_tensor(self, device='cpu'):
+        # Converte in tensore PyTorch e aggiunge la dimensione del Batch (1, 18, 8, 8)
+        tensor = torch.from_numpy(self.serialize()).to(device)
+        return tensor.unsqueeze(0)

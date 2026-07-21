@@ -12,8 +12,6 @@ class ChessValueDataset(Dataset):
         self.X = data['arr_0']
         self.Y = data['arr_1']
         print("loaded", self.X.shape, self.Y.shape)
-
-
     
     def __len__(self):
         return self.X.shape[0]
@@ -22,52 +20,74 @@ class ChessValueDataset(Dataset):
         return (self.X[idx], self.Y[idx])
 
 
-class Net(nn.Module):
-  def __init__(self):
-    super(Net, self).__init__()
-    self.a1 = nn.Conv2d(5, 16, kernel_size=3, padding=1)
-    self.a2 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
-    self.a3 = nn.Conv2d(16, 32, kernel_size=3, stride=2)
+class ResidualBlock(nn.Module):
+    """
+    Mantiene le dimensioni spaziali (8x8) intatte usando kernel 3x3 e padding 1.
+    """
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
 
-    self.b1 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
-    self.b2 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
-    self.b3 = nn.Conv2d(32, 64, kernel_size=3, stride=2)
+    def forward(self, x):
+        residual = x
+        
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        
+        out += residual
+        out = F.relu(out)
+        return out
 
-    self.c1 = nn.Conv2d(64, 64, kernel_size=2, padding=1)
-    self.c2 = nn.Conv2d(64, 64, kernel_size=2, padding=1)
-    self.c3 = nn.Conv2d(64, 128, kernel_size=2, stride=2)
 
-    self.d1 = nn.Conv2d(128, 128, kernel_size=1)
-    self.d2 = nn.Conv2d(128, 128, kernel_size=1)
-    self.d3 = nn.Conv2d(128, 128, kernel_size=1)
+class ChessResNet(nn.Module):
+    def __init__(self, num_res_blocks=5, num_filters=64):
+        super(ChessResNet, self).__init__()
+        
+        # Riceve i 18 canali del nostro State e li espande a num_filters (es. 64)
+        self.conv_in = nn.Conv2d(18, num_filters, kernel_size=3, padding=1, bias=False)
+        self.bn_in = nn.BatchNorm2d(num_filters)
+        
+        # 'num_res_blocks' blocchi residui uno dopo l'altro
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(num_filters) for _ in range(num_res_blocks)
+        ])
+        
+        # --- POLICY HEAD ---
+        # Comprime a 2 canali e poi proietta nello spazio delle 4096 mosse
+        self.policy_conv = nn.Conv2d(num_filters, 2, kernel_size=1)
+        self.policy_bn = nn.BatchNorm2d(2)
+        self.policy_fc = nn.Linear(2 * 8 * 8, 4096)
+        
+        # --- VALUE HEAD ---
+        # Comprime a 1 canale, processa linearmente e restituisce un numero da -1 a 1
+        self.value_conv = nn.Conv2d(num_filters, 1, kernel_size=1)
+        self.value_bn = nn.BatchNorm2d(1)
+        self.value_fc1 = nn.Linear(8 * 8, 64)
+        self.value_fc2 = nn.Linear(64, 1)
 
-    self.last = nn.Linear(128, 1)
-
-  def forward(self, x):
-    x = F.relu(self.a1(x))
-    x = F.relu(self.a2(x))
-    x = F.relu(self.a3(x))
-
-    # 4x4
-    x = F.relu(self.b1(x))
-    x = F.relu(self.b2(x))
-    x = F.relu(self.b3(x))
-
-    # 2x2
-    x = F.relu(self.c1(x))
-    x = F.relu(self.c2(x))
-    x = F.relu(self.c3(x))
-
-    # 1x128
-    x = F.relu(self.d1(x))
-    x = F.relu(self.d2(x))
-    x = F.relu(self.d3(x))
-
-    x = x.view(-1, 128)
-    x = self.last(x)
-
-    # value output
-    return F.tanh(x)
+    def forward(self, x):
+        # blocco iniziale
+        x = F.relu(self.bn_in(self.conv_in(x)))
+        
+        # blocchi residui
+        for block in self.res_blocks:
+            x = block(x)
+            
+        # 3. Ramo Policy (Output: Logits grezzi per 4096 mosse)
+        p = F.relu(self.policy_bn(self.policy_conv(x)))
+        p = p.view(p.size(0), -1)  # Flatten: da (Batch, 2, 8, 8) a (Batch, 128)
+        policy_logits = self.policy_fc(p)
+        
+        # 4. Ramo Value (Output: Scalare tra -1 e 1)
+        v = F.relu(self.value_bn(self.value_conv(x)))
+        v = v.view(v.size(0), -1)  # Flatten: da (Batch, 1, 8, 8) a (Batch, 64)
+        v = F.relu(self.value_fc1(v))
+        value_eval = torch.tanh(self.value_fc2(v))  # Tanh forza l'uscita esattamente tra -1 e 1
+        
+        return policy_logits, value_eval
   
 if __name__ == "__main__":
     if torch.cuda.is_available():
