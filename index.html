@@ -3,10 +3,10 @@
 <head>
   <title>Scacchi AI</title>
   
-  <!-- Chessboard2 Modern CSS tramite CDN -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@chrisoakman/chessboard2@0.5.0/dist/chessboard2.min.css">
-  <!-- Chessboard2 Modern JS tramite CDN  -->
-  <script src="https://cdn.jsdelivr.net/npm/@chrisoakman/chessboard2@0.5.0/dist/chessboard2.min.js"></script>
+  <!-- JQuery 3.6.0 e Chessboard.js 1.0.0 (Stabile) -->
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
 
   <style>
     body {
@@ -14,72 +14,63 @@
       background-color: #f0f0f0;
       margin: 40px;
     }
-    .controls {
-      margin-bottom: 20px;
-    }
+    .controls { margin-bottom: 20px; }
     button {
-      padding: 10px 18px;
-      font-size: 16px;
-      font-weight: bold;
-      background-color: #4a90e2;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      padding: 10px 18px; font-size: 16px; font-weight: bold;
+      background-color: #4a90e2; color: white; border: none;
+      border-radius: 6px; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    button:hover {
-      background-color: #357abd;
-    }
+    button:hover { background-color: #357abd; }
     
     .game-container {
-      display: flex;
-      align-items: center;
-      gap: 16px;
+      display: flex; align-items: center; gap: 16px;
     }
     
+    /* Eval Bar */
     .eval-bar-wrapper {
-      width: 24px;
-      height: 600px;
-      background-color: #312e2b;
-      border-radius: 4px;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-      box-shadow: inset 0 0 6px rgba(0,0,0,0.6);
+      width: 24px; height: 600px; background-color: #312e2b;
+      border-radius: 4px; overflow: hidden; display: flex;
+      flex-direction: column; box-shadow: inset 0 0 6px rgba(0,0,0,0.6);
     }
     .eval-fill {
-      width: 100%;
-      transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      width: 100%; transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     }
-    #eval-black {
-      background-color: #262421;
-      height: 50%;
-    }
-    #eval-white {
-      background-color: #ffffff;
-      height: 50%;
-    }
+    #eval-black { background-color: #262421; height: 50%; }
+    #eval-white { background-color: #ffffff; height: 50%; }
 
     #game-status {
-      margin-top: 20px;
-      padding: 15px;
-      width: 570px;
-      background-color: #e74c3c;
-      color: white;
-      font-size: 22px;
-      font-weight: bold;
-      text-align: center;
-      border-radius: 6px;
-      display: none;
-      box-shadow: 0 4px 6px rgba(0,0,0,0.15);
+      margin-top: 20px; padding: 15px; width: 570px;
+      background-color: #e74c3c; color: white; font-size: 22px;
+      font-weight: bold; text-align: center; border-radius: 6px;
+      display: none; box-shadow: 0 4px 6px rgba(0,0,0,0.15);
+    }
+
+   /* Mossa normale su casella vuota: pallino verde */
+    .highlight-legal {
+      background-image: radial-gradient(rgba(20, 180, 20, 0.65) 18%, transparent 19%) !important;
+    }
+
+    /* Mossa di cattura: anello verde vuoto più stretto e centrato */
+    .highlight-legal:has(img) {
+      background-image: radial-gradient(
+        transparent 48%, 
+        rgba(20, 180, 20, 0.65) 50%, 
+        rgba(20, 180, 20, 0.65) 62%, 
+        transparent 64%
+      ) !important;
+    }
+
+    .highlight-source {
+      background-color: rgba(255, 255, 0, 0.4) !important;
     }
   </style>
 </head>
 <body>
 
 <div class="controls">
-  <button onclick="newGame()">Nuova Partita</button>
+  <button onclick="newGame('white')">Gioca col Bianco</button>
+  <button onclick="newGame('black')">Gioca col Nero</button>
+  <button onclick="newGame('random')">Colore Casuale</button>
 </div>
 
 <div class="game-container">
@@ -91,12 +82,18 @@
   <div id="board" style="width: 600px"></div>
 </div>
 
-<div id="game-status">Partita Terminata! (Game Over)</div>
+<div id="game-status">Partita Terminata!</div>
 
 <script type="text/javascript">
-var board = Chessboard2('board', {
+var legalMovesMap = {};
+var isGameOver = false;
+var playerColor = 'white';
+
+var board = Chessboard('board', {
   position: 'start',
   draggable: true,
+  pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+  onDragStart: onDragStart,
   onDrop: onDrop
 });
 
@@ -114,48 +111,102 @@ function updateEvalBar(evalScore) {
   document.getElementById("eval-black").style.height = blackPercent + "%";
 }
 
-function onDrop(data) {
-  var source = data.source;
-  var target = data.target;
-  var piece = data.piece;
+function removeHighlights() {
+  $('#board .square-55d63').removeClass('highlight-legal highlight-source');
+}
 
+// Quando si clicca o si inizia a trascinare un pezzo
+function onDragStart(source, piece, position, orientation) {
+  if (isGameOver) return false;
+
+  // Se giochi col bianco, non muovi i neri (iniziano per 'b'). 
+  // Se giochi col nero, non muovi i bianchi ('w').
+  if ((playerColor === 'white' && piece.search(/^b/) !== -1) ||
+      (playerColor === 'black' && piece.search(/^w/) !== -1)) {
+    return false;
+  }
+
+  removeHighlights();
+  $('#board .square-' + source).addClass('highlight-source');
+
+  var moves = legalMovesMap[source];
+  if (moves) {
+    for (var i = 0; i < moves.length; i++) {
+      $('#board .square-' + moves[i]).addClass('highlight-legal');
+    }
+  }
+}
+
+function onDrop(source, target, piece) {
+  removeHighlights();
+
+  // Se la destinazione non è tra le mosse legali, annulla la mossa
+  var validMoves = legalMovesMap[source] || [];
+  if (!validMoves.includes(target)) {
+    return 'snapback';
+  }
+  
   if (source === target) return;
 
   var promotion = piece.toLowerCase().charAt(1) === 'p' && parseInt(target.charAt(1)) === 8;
 
-  var url = new URL(window.location.origin + '/move_coordinates');
-  url.searchParams.append('from', get_square(source));
-  url.searchParams.append('to', get_square(target));
-  url.searchParams.append('promotion', promotion);
+  var url = '/move_coordinates?from=' + get_square(source) + '&to=' + get_square(target) + '&promotion=' + promotion;
 
-  fetch(url)
-    .then(response => response.json())
-    .then(serverData => {
-      board.position(serverData.fen);
-      
-      if (serverData.eval !== undefined) {
-        updateEvalBar(serverData.eval);
-      }
-      
-      if (serverData.game_over) {
-        var statusDiv = document.getElementById('game-status');
-        statusDiv.innerText = serverData.result_text || "Partita Terminata!";
-        statusDiv.style.display = 'block';
-      } else {
-        document.getElementById('game-status').style.display = 'none';
-      }
-    })
-    .catch(err => console.error("Errore durante la mossa:", err));
-}
-
-function newGame() {
-  fetch('/newgame')
-    .then(() => {
-      board.position('start');
-      updateEvalBar(0.0);
+  $.get(url, function(serverData) {
+    // Animazione fluida nativa di Chessboardjs v1.0.0
+    board.position(serverData.fen, true);
+    
+    legalMovesMap = serverData.legal_moves || {};
+    isGameOver = serverData.game_over || false;
+    
+    if (serverData.eval !== undefined) updateEvalBar(serverData.eval);
+    
+    if (isGameOver) {
+      var statusDiv = document.getElementById('game-status');
+      statusDiv.innerText = serverData.result_text || "Partita Terminata!";
+      statusDiv.style.display = 'block';
+    } else {
       document.getElementById('game-status').style.display = 'none';
-    });
+    }
+  });
 }
+
+function newGame(color) {
+  // Se ha scelto random, tira una moneta (50% bianco, 50% nero)
+  if (color === 'random') {
+    color = Math.random() < 0.5 ? 'white' : 'black';
+  }
+  playerColor = color;
+
+  // Passiamo il colore richiesto al backend di Python
+  $.get('/newgame?color=' + color, function(serverData) {
+    board.orientation(color); // Gira la scacchiera graficamente!
+    board.position(serverData.fen, false); // Niente animazione durante il reset
+    legalMovesMap = serverData.legal_moves || {};
+    isGameOver = false;
+    removeHighlights();
+    updateEvalBar(0.0);
+    document.getElementById('game-status').style.display = 'none';
+  });
+}
+
+
+// Cliccando fuori si puliscono i pallini
+$(document).on('click', function(e) {
+  if (!$(e.target).closest('#board').length) {
+    removeHighlights();
+  }
+});
+
+// Richiedi lo stato iniziale e le mosse appena si apre la pagina
+$(document).ready(function() {
+  $.get('/get_state', function(serverData) {
+    legalMovesMap = serverData.legal_moves || {};
+    isGameOver = serverData.game_over || false;
+    if (serverData.fen) board.position(serverData.fen, false);
+    if (serverData.eval !== undefined) updateEvalBar(serverData.eval);
+  });
+});
 </script>
 
 </body>
