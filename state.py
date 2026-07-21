@@ -12,7 +12,6 @@ class State:
     def serialize(self):
         """
         Trasforma la scacchiera in un tensore 3D di forma (18, 8, 8)
-        pronto per essere consumato dalla ResNet.
         """
         # Inizializziamo una matrice di zeri 18x8x8
         bstate = np.zeros((18, 8, 8), dtype=np.float32)
