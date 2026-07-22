@@ -14,30 +14,41 @@ import matplotlib.pyplot as plt
 import os
 import glob
 import gc
+import pyarrow.parquet as pq
+import random
 
 class ChessDataset(Dataset):
-    def __init__(self, parquet_path, max_rows=100000):
+    def __init__(self, data_source, max_rows=None, verbose=True):
         """
-        Carica e processa il file Parquet.
+        data_source: può essere una stringa (percorso al file .parquet)[cite: 1] 
+                     oppure direttamente un DataFrame Pandas (per lo streaming).[cite: 1]
         """
-        df = pd.read_parquet(parquet_path)
+        if isinstance(data_source, str):
+            if verbose:
+                print(f"[{data_source}] Lettura del file Parquet dal disco...")
+            df = pd.read_parquet(data_source)
+        elif isinstance(data_source, pd.DataFrame):
+            df = data_source
+        else:
+            raise ValueError("data_source deve essere un percorso (str) o un DataFrame!")
+            
         if max_rows is not None:
             df = df.head(max_rows)
-        
+            
         self.data = []
         
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Preparazione Dataset"):
+        iterator = df.iterrows() if not verbose else tqdm(df.iterrows(), total=len(df), desc="Preparazione Dati")
+        
+        for _, row in iterator:
             fen = str(row['fen'])
             turno_bianco = fen.split()[1] == 'w'
             
-            # Policy Head Target
             colonna_mossa = 'line' if 'line' in df.columns else 'move'
             linea = str(row.get(colonna_mossa, ''))
             if not linea or len(linea) < 4 or linea == 'nan':
                 continue 
             best_move = linea.split()[0]
             
-            # Value Head Target
             value = 0.0
             if 'cp' in df.columns and 'mate' in df.columns:
                 if pd.notna(row['mate']):
@@ -63,6 +74,9 @@ class ChessDataset(Dataset):
                         
             self.data.append((fen, best_move, value))
             
+        if verbose:
+            print(f"Dataset pronto: {len(self.data)} posizioni caricate in RAM.")
+
     def __len__(self):
         return len(self.data)
 
@@ -84,14 +98,14 @@ def count_parameters(model):
 
 def encode_move(move: chess.Move) -> int:
     """
-    Converte un oggetto chess.Move in un indice intero compreso tra 0 e 4095.
+    Converte un oggetto chess.Move in un indice intero compreso tra 0 e 4095.[cite: 1]
     """
     return (move.from_square * 64) + move.to_square
 
 
 def decode_move(index: int, board: chess.Board = None) -> chess.Move:
     """
-    Converte un indice da 0 a 4095 in un oggetto chess.Move.
+    Converte un indice da 0 a 4095 in un oggetto chess.Move.[cite: 1]
     """
     from_sq = index // 64
     to_sq = index % 64
@@ -99,16 +113,16 @@ def decode_move(index: int, board: chess.Board = None) -> chess.Move:
     if board is not None:
         for move in board.legal_moves:
             if move.from_square == from_sq and move.to_square == to_sq:
-                # se è una promozione, python-chess elenca per prima la promozione a Regina!)
+                # se è una promozione, python-chess elenca per prima la promozione a Regina!)[cite: 1]
                 return move
                 
-    # Fallback standard se non passiamo la scacchiera (nessuna promozione)
+    # Fallback standard se non passiamo la scacchiera (nessuna promozione)[cite: 1]
     return chess.Move(from_sq, to_sq)
 
 
 def get_legal_moves_mask(board: chess.Board) -> torch.Tensor:
     """
-    Crea una maschera booleana di 4096 elementi
+    Crea una maschera booleana di 4096 elementi[cite: 1]
     """
     mask = torch.zeros(4096, dtype=torch.bool)
     for move in board.legal_moves:
@@ -119,7 +133,7 @@ def get_legal_moves_mask(board: chess.Board) -> torch.Tensor:
 
 class ResidualBlock(nn.Module):
     """
-    Mantiene le dimensioni spaziali (8x8) intatte usando kernel 3x3 e padding 1.
+    Mantiene le dimensioni spaziali (8x8) intatte usando kernel 3x3 e padding 1.[cite: 1]
     """
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
@@ -166,17 +180,85 @@ class ChessResNet(nn.Module):
             x = block(x)
             
         p = F.relu(self.policy_bn(self.policy_conv(x)))
-        p = p.view(p.size(0), -1)  # Flatten: da (Batch, 2, 8, 8) a (Batch, 128)
+        p = p.view(p.size(0), -1)  # Flatten: da (Batch, 2, 8, 8) a (Batch, 128)[cite: 1]
         policy_logits = self.policy_fc(p)
         
         v = F.relu(self.value_bn(self.value_conv(x)))
-        v = v.view(v.size(0), -1)  # Flatten: da (Batch, 1, 8, 8) a (Batch, 64)
+        v = v.view(v.size(0), -1)  # Flatten: da (Batch, 1, 8, 8) a (Batch, 64)[cite: 1]
         v = F.relu(self.value_fc1(v))
         value_eval = torch.tanh(self.value_fc2(v))
         
         return policy_logits, value_eval
   
-def train_loop(modello, parquet_files, epochs=3, batch_size=128, max_rows_per_file=None, lr=0.001, device=None):
+def validate_model(modello, val_file_path, chunk_size=100000, max_val_positions=200000, device='cpu'):
+    """
+    Calcola la loss su dati mai visti dal modello.[cite: 1]
+    """
+    print(f"\nVALIDATION sul file: {val_file_path}")
+    modello.eval()
+    
+    criterion_policy = nn.CrossEntropyLoss()
+    criterion_value = nn.MSELoss()
+    
+    val_loss_tot = 0.0
+    val_loss_p = 0.0
+    val_loss_v = 0.0
+    total_batches = 0
+    posizioni_viste_val = 0
+    
+    parquet_file = pq.ParquetFile(val_file_path)
+    
+    val_rows_total = min(parquet_file.metadata.num_rows, max_val_positions) if max_val_positions else parquet_file.metadata.num_rows
+    pbar_val = tqdm(total=val_rows_total, desc="Validation", unit="pos", leave=False)
+    
+    with torch.no_grad():
+        for batch in parquet_file.iter_batches(batch_size=chunk_size):
+            df_val_chunk = batch.to_pandas()
+            val_dataset = ChessDataset(df_val_chunk, verbose=False)
+            val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
+            
+            righe_saltate = len(df_val_chunk) - len(val_dataset)
+            
+            for board_tensor, policy_target, value_target in val_loader:
+                board_tensor = board_tensor.to(device)
+                policy_target = policy_target.to(device)
+                value_target = value_target.to(device)
+                
+                policy_logits, value_eval = modello(board_tensor)
+                
+                loss_p = criterion_policy(policy_logits, policy_target)
+                loss_v = criterion_value(value_eval, value_target)
+                
+                val_loss_p += loss_p.item()
+                val_loss_v += loss_v.item()
+                val_loss_tot += (loss_p.item() + loss_v.item())
+                total_batches += 1
+                
+                posizioni_batch = board_tensor.size(0)
+                posizioni_viste_val += posizioni_batch
+                pbar_val.update(posizioni_batch)
+                
+                if max_val_positions and posizioni_viste_val >= max_val_positions:
+                    break
+                
+            if righe_saltate > 0 and posizioni_viste_val < max_val_positions:
+                pbar_val.update(righe_saltate)
+                
+            del df_val_chunk, val_dataset, val_loader
+            gc.collect()
+            
+            if max_val_positions and posizioni_viste_val >= max_val_positions:
+                break
+            
+    pbar_val.close()
+    modello.train()
+    if total_batches == 0:
+        return 0.0, 0.0, 0.0
+        
+    return val_loss_tot / total_batches, val_loss_p / total_batches, val_loss_v / total_batches
+
+
+def train_loop(modello, train_files, val_file, chunk_size=100000, max_positions_per_epoch=2000000, epochs=2, lr=0.001, device=None):
     if device is None:
         if torch.cuda.is_available():
             device = 'cuda'
@@ -184,8 +266,17 @@ def train_loop(modello, parquet_files, epochs=3, batch_size=128, max_rows_per_fi
             device = 'mps'
         else:
             device = 'cpu'
-
+            
     print(f"Training su device: {device}")
+    
+    totale_righe_reali = sum(pq.ParquetFile(f).metadata.num_rows for f in train_files)    
+    totale_righe_epoch = min(totale_righe_reali, max_positions_per_epoch) if max_positions_per_epoch else totale_righe_reali
+    print(f"Posizioni totali disponibili: {totale_righe_reali:,}")
+    print(f"Obiettivo posizioni per Epoca: {totale_righe_epoch:,}")
+    
+    posizioni_per_file = max(1, totale_righe_epoch // len(train_files)) if max_positions_per_epoch else None
+    if posizioni_per_file:
+        print(f"Quota distribuita: il modello elaborerà fino a ~{posizioni_per_file:,} posizioni da ogni singolo shard.")
 
     modello = modello.to(device)
     modello.train()
@@ -194,99 +285,160 @@ def train_loop(modello, parquet_files, epochs=3, batch_size=128, max_rows_per_fi
     criterion_policy = nn.CrossEntropyLoss()
     criterion_value = nn.MSELoss()
 
-    history_policy = []
-    history_value = []
-    history_total = []
-    totale_posizioni_viste = 0
+    history_train = []
+    history_val = []
+    totale_posizioni_viste_globale = 0
 
     for epoch in range(epochs):
         print(f"\n=== EPOCH [{epoch+1}/{epochs}] ===")
+        posizioni_viste_questa_epoca = 0
         
-        for file_idx, file_path in enumerate(parquet_files):
-            print(f"\nCaricamento Shard [{file_idx+1}/{len(parquet_files)}]: {file_path}")
+        random.shuffle(train_files)
+        
+        pbar = tqdm(total=totale_righe_epoch, desc=f"Epoch {epoch+1}/{epochs}", unit="pos")
+        
+        for file_idx, file_path in enumerate(train_files):
+            tqdm.write(f"\nApertura Shard [{file_idx+1}/{len(train_files)}]: {file_path}")
+            parquet_file = pq.ParquetFile(file_path)
             
-            dataset = ChessDataset(file_path, max_rows=max_rows_per_file)
-            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-            totale_posizioni_viste += len(dataset)
+            righe_file = parquet_file.metadata.num_rows
+            chunk_totali = righe_file // chunk_size
+            chunk_necessari = math.ceil(posizioni_per_file / chunk_size) if posizioni_per_file else chunk_totali
             
-            loss_p_accum = 0.0
-            loss_v_accum = 0.0
-            loss_tot_accum = 0.0
+            max_start_chunk = max(0, chunk_totali - chunk_necessari)
+            start_chunk = random.randint(0, max_start_chunk) if posizioni_per_file else 0
+            if start_chunk > 0:
+                tqdm.write(f"\nSalto casuale: inizio la lettura dal chunk {start_chunk} (circa dalla riga {start_chunk * chunk_size:,})...")
             
-            pbar = tqdm(dataloader, desc=f"Epoch {epoch+1} | Shard {file_idx+1}", unit="batch")
+            shard_loss_accum = 0.0
+            shard_batches = 0
+            posizioni_viste_questo_file = 0
             
-            for board_tensor, policy_target, value_target in pbar:
-                board_tensor = board_tensor.to(device)
-                policy_target = policy_target.to(device)
-                value_target = value_target.to(device)
+            for chunk_idx, batch in enumerate(parquet_file.iter_batches(batch_size=chunk_size)):
+                if chunk_idx < start_chunk:
+                    continue
                 
-                optimizer.zero_grad()
-                policy_logits, value_eval = modello(board_tensor)
+                df_chunk = batch.to_pandas()
                 
-                loss_p = criterion_policy(policy_logits, policy_target)
-                loss_v = criterion_value(value_eval, value_target)
-                loss_totale = loss_p + loss_v
+                dataset = ChessDataset(df_chunk, verbose=False)
+                dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
                 
-                loss_totale.backward()
-                optimizer.step()
-                
-                loss_p_accum += loss_p.item()
-                loss_v_accum += loss_v.item()
-                loss_tot_accum += loss_totale.item()
-                
-                pbar.set_postfix({
-                    'L_Pol': f"{loss_p.item():.4f}",
-                    'L_Val': f"{loss_v.item():.4f}",
-                    'L_Tot': f"{loss_totale.item():.4f}"
-                })
-                
-            n_batches = len(dataloader)
-            if n_batches > 0:
-                history_policy.append(loss_p_accum / n_batches)
-                history_value.append(loss_v_accum / n_batches)
-                history_total.append(loss_tot_accum / n_batches)
-            
-            # PULIZIA MEMORIA: cancelliamo dataset e dataloader per far posto al prossimo file
-            del dataset
-            del dataloader
-            gc.collect()
+                if len(dataset) == 0:
+                    del df_chunk, dataset, dataloader
+                    continue
                     
+                righe_saltate = len(df_chunk) - len(dataset)
+                
+                for board_tensor, policy_target, value_target in dataloader:
+                    board_tensor = board_tensor.to(device)
+                    policy_target = policy_target.to(device)
+                    value_target = value_target.to(device)
+                    
+                    optimizer.zero_grad()
+                    policy_logits, value_eval = modello(board_tensor)
+                    
+                    loss_p = criterion_policy(policy_logits, policy_target)
+                    loss_v = criterion_value(value_eval, value_target)
+                    loss_totale = loss_p + loss_v
+                    
+                    loss_totale.backward()
+                    optimizer.step()
+                    
+                    shard_loss_accum += loss_totale.item()
+                    shard_batches += 1
+                    
+                    pos_batch = board_tensor.size(0)
+                    posizioni_viste_questo_file += pos_batch
+                    posizioni_viste_questa_epoca += pos_batch
+                    totale_posizioni_viste_globale += pos_batch
+                    
+                    pbar.update(pos_batch)
+                    pbar.set_postfix({
+                        'Shard': f"{file_idx+1}/{len(train_files)}",
+                        'Pol': f"{loss_p.item():.3f}",
+                        'Val': f"{loss_v.item():.3f}",
+                        'Tot': f"{loss_totale.item():.3f}"
+                    })
+                    
+                    if posizioni_per_file and posizioni_viste_questo_file >= posizioni_per_file:
+                        break
+                    if max_positions_per_epoch and posizioni_viste_questa_epoca >= max_positions_per_epoch:
+                        break
+                
+                if righe_saltate > 0 and (not max_positions_per_epoch or posizioni_viste_questa_epoca < max_positions_per_epoch):
+                    pbar.update(righe_saltate)
+                
+                del df_chunk, dataset, dataloader
+                gc.collect()
+                
+                if posizioni_per_file and posizioni_viste_questo_file >= posizioni_per_file:
+                    break
+                if max_positions_per_epoch and posizioni_viste_questa_epoca >= max_positions_per_epoch:
+                    break
+            
+            if shard_batches > 0:
+                history_train.append(shard_loss_accum / shard_batches)
+                
+                val_loss_tot, _, _ = validate_model(modello, val_file, chunk_size, max_val_positions=50000, device=device)
+                history_val.append(val_loss_tot)
+
+            if max_positions_per_epoch and posizioni_viste_questa_epoca >= max_positions_per_epoch:
+                tqdm.write(f"\nRaggiunto il tetto massimo di {max_positions_per_epoch:,} posizioni per l'epoca {epoch+1}")
+                break
+                
+        pbar.close()
+                
+        train_loss_media = np.mean(history_train[-len(train_files):]) if history_train else 0.0
+        val_loss_media = np.mean(history_val[-len(train_files):]) if history_val else 0.0
+        
+        print(f"\nFine Epoch {epoch+1} / {epochs} | Posizioni totali viste: {totale_posizioni_viste_globale:,}")
+        print(f"[TRAIN LOSS]: {train_loss_media:.4f}")
+        print(f"[VAL LOSS]:   {val_loss_media:.4f}")
+        
     os.makedirs("./nets", exist_ok=True)
     num_params = count_parameters(modello)
     params_str = f"{num_params / 1e6:.1f}M" if num_params >= 1e6 else f"{num_params / 1e3:.0f}K"
-    pos_str = f"{totale_posizioni_viste // 1000}k" if totale_posizioni_viste >= 1000 else str(totale_posizioni_viste)
-    
-    model_filename = f"./nets/mini_alphazero_p{params_str}_d{pos_str}_ep{epochs}.pth"
+
+    model_filename = f"./nets/mini_alphazero_p{params_str}_d{totale_posizioni_viste_globale // 1000000}M.pth"
     torch.save(modello.state_dict(), model_filename)
-    print(f"Modello salvato con successo: {model_filename}")
+    print(f"Modello salvato: {model_filename}")
 
     os.makedirs("./plots", exist_ok=True)
-    plt.figure(figsize=(12, 6))
-    plt.plot(history_total, label='Loss Totale', color='purple', linewidth=2)
-    plt.plot(history_policy, label='Loss Policy (CrossEntropy)', color='blue', linestyle='--')
-    plt.plot(history_value, label='Loss Value (MSE)', color='orange', linestyle='--')
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(history_train) + 1), history_train, label='Train Loss', marker='o', color='blue', linewidth=2)
+    plt.plot(range(1, len(history_val) + 1), history_val, label='Validation Loss', marker='s', color='red', linewidth=2, linestyle='--')
     
-    plt.title(f"Training su {len(parquet_files)} Shard ({totale_posizioni_viste:,} posizioni viste)", fontsize=14, fontweight='bold')
-    plt.xlabel("Numero di Shard processati nel tempo", fontsize=12)
-    plt.ylabel("Loss Media per Shard", fontsize=12)
+    plt.title(f"Train vs Validation Loss ad Alta Risoluzione ({totale_posizioni_viste_globale:,} posizioni viste)", fontsize=14, fontweight='bold')
+    plt.xlabel("Step di Training (Shard processati)", fontsize=12)
+    plt.ylabel("Loss Media", fontsize=12)
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.legend(fontsize=11)
     
-    plot_filename = f"./plots/training_p{params_str}_d{pos_str}_ep{epochs}.png"
+    plot_filename = f"./plots/p{params_str}_d{totale_posizioni_viste_globale // 1000}k.png"
     plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"\nGrafico Losses salvato in: {plot_filename}\n")
+    print(f"Grafico salvato in: {plot_filename}\n")
 
 
 if __name__ == "__main__":
+    file_parquet = sorted(glob.glob("data/*.parquet"))
     
-    file_parquet = sorted(glob.glob("data/*.parquet"))    
-    modello = ChessResNet()
-
-    train_loop(
-        modello=modello, 
-        parquet_files=file_parquet, 
-        epochs=5, 
-        batch_size=128,
-        max_rows_per_file=100000
-    )
+    if len(file_parquet) < 2:
+        print("Errore: Servono almeno 2 file parquet per fare Train + Validation")
+    else:
+        train_files = file_parquet[:-1]
+        val_file = file_parquet[-1]
+        
+        print(f"Trovati {len(file_parquet)} file totali.")
+        print(f"Training su {len(train_files)} file | Validation sull'ultimo file ({val_file})")
+        
+        modello = ChessResNet()
+        
+        train_loop(
+            modello=modello,
+            train_files=train_files,
+            val_file=val_file,
+            chunk_size=100000,
+            max_positions_per_epoch=2000000,
+            epochs=3
+        )
