@@ -1,38 +1,64 @@
 #!/usr/bin/python3
 import torch
-from state import State
-from train import Net
-import chess.svg
-import base64
+import chess
 import traceback
+from flask import Flask, request, jsonify
+from state import State
+from train import ChessResNet, encode_move 
 
 
-class Valuator():
-    def __init__(self):
-        vals = torch.load("nets/value_net_2M.pth", map_location=lambda storage, loc: storage)
-        self.model = Net()
-        self.model.load_state_dict(vals)
+class NeuralEvaluator():
+    def __init__(self, model_path):
+        self.device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+        print(f"Caricamento modello su {self.device.upper()}...")
+        
+        self.model = ChessResNet()
+        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+        self.model.to(self.device)
+        self.model.eval()
 
-    def __call__(self, s):
+    def evaluate_and_order(self, s):
+        """
+        Interroga la ResNet e restituisce:
+        1. Le mosse legali ordinate per probabilità (Policy Head)
+        2. La valutazione della posizione (Value Head)
+        """
         brd = s.serialize()
-        return self.model(torch.tensor(brd).float()).item()
+        board_tensor = torch.tensor(brd).float().unsqueeze(0).to(self.device)
+        
+        with torch.no_grad():
+            policy_logits, value_eval = self.model(board_tensor)
+            
+        policy_logits = policy_logits.squeeze(0).cpu().numpy()
+        value = value_eval.item()
+        
+        move_scores = []
+        for move in s.board.legal_moves:
+            idx = encode_move(move)
+            score = policy_logits[idx]
+            move_scores.append((move, score))
+            
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        ordered_moves = [m[0] for m in move_scores]
+        
+        return ordered_moves, value
 
 
-def alpha_beta(s, v, depth, alpha, beta, maximizing_player):
-    # Se abbiamo raggiunto la profondità massima o la partita è finita
+def alpha_beta(s, evaluator, depth, alpha, beta, maximizing_player):
     if depth == 0 or s.board.is_game_over():
-        # Valutazioni estreme per evitare/cercare lo scacco matto
         if s.board.is_checkmate():
-            # Se è il turno di chi massimizza, vuol dire che ha appena subìto matto
             return -10000 if maximizing_player else 10000
-        # Altrimenti, delega la valutazione alla rete neurale
-        return v(s)
+            
+        _, val = evaluator.evaluate_and_order(s)
+        return val
+
+    ordered_moves, _ = evaluator.evaluate_and_order(s)
 
     if maximizing_player:
         max_eval = -float('inf')
-        for move in s.board.legal_moves:
+        for move in ordered_moves:
             s.board.push(move)
-            ev = alpha_beta(s, v, depth - 1, alpha, beta, False)
+            ev = alpha_beta(s, evaluator, depth - 1, alpha, beta, False)
             s.board.pop()
             max_eval = max(max_eval, ev)
             alpha = max(alpha, ev)
@@ -41,9 +67,9 @@ def alpha_beta(s, v, depth, alpha, beta, maximizing_player):
         return max_eval
     else:
         min_eval = float('inf')
-        for move in s.board.legal_moves:
+        for move in ordered_moves:
             s.board.push(move)
-            ev = alpha_beta(s, v, depth - 1, alpha, beta, True)
+            ev = alpha_beta(s, evaluator, depth - 1, alpha, beta, True)
             s.board.pop()
             min_eval = min(min_eval, ev)
             beta = min(beta, ev)
@@ -51,21 +77,19 @@ def alpha_beta(s, v, depth, alpha, beta, maximizing_player):
                 break
         return min_eval
 
-def computer_move(s, v, depth=3):
-    """
-    Sceglie la mossa calcolando 'depth' turni nel futuro.
-    depth=2 significa: Mia mossa -> Tua risposta.
-    """
+def computer_move(s, evaluator, depth=3):
     maximizing = s.board.turn == chess.WHITE
     best_move = None
     alpha = -float('inf')
     beta = float('inf')
+    
+    ordered_moves, current_eval = evaluator.evaluate_and_order(s)
 
     if maximizing:
         best_eval = -float('inf')
-        for move in s.board.legal_moves:
+        for move in ordered_moves:
             s.board.push(move)
-            ev = alpha_beta(s, v, depth - 1, alpha, beta, False)
+            ev = alpha_beta(s, evaluator, depth - 1, alpha, beta, False)
             s.board.pop()
             if ev > best_eval:
                 best_eval = ev
@@ -73,9 +97,9 @@ def computer_move(s, v, depth=3):
             alpha = max(alpha, ev)
     else:
         best_eval = float('inf')
-        for move in s.board.legal_moves:
+        for move in ordered_moves:
             s.board.push(move)
-            ev = alpha_beta(s, v, depth - 1, alpha, beta, True)
+            ev = alpha_beta(s, evaluator, depth - 1, alpha, beta, True)
             s.board.pop()
             if ev < best_eval:
                 best_eval = ev
@@ -86,11 +110,11 @@ def computer_move(s, v, depth=3):
         print(f"Turno: {'Bianco' if maximizing else 'Nero'} | Mossa scelta: {best_move} | Eval attesa: {best_eval:.3f}")
         s.board.push(best_move)
 
+
 s = State()
-v = Valuator()
+v = NeuralEvaluator("nets/mini_alphazero_p913K_d6000k.pth") 
 
 
-from flask import Flask, Response, request, jsonify
 app = Flask(__name__)
 
 @app.route('/')
@@ -98,28 +122,23 @@ def hello():
     ret = open('index.html').read()
     return ret.replace('start', s.board.fen())
 
-
 @app.route("/newgame")
 def newgame():
     s.board.reset()
-    
-    # Leggiamo quale colore ha scelto il giocatore (di base il bianco)
     player_color = request.args.get('color', default='white')
-    
-    # Se il giocatore umano ha scelto il Nero, l'IA gioca col Bianco e deve fare la prima mossa!
     if player_color == 'black':
         computer_move(s, v)
         
+    _, current_eval = v.evaluate_and_order(s)
+    
     return jsonify({
         "fen": s.board.fen(),
-        "eval": v(s),
+        "eval": current_eval,
         "game_over": s.board.is_game_over(),
         "result_text": get_game_result(s.board),
         "legal_moves": get_legal_moves_map(s.board)
     })
 
-
-# Helper to get a clear Italian game-over reason
 def get_game_result(board):
     if not board.is_game_over():
         return ""
@@ -134,7 +153,6 @@ def get_game_result(board):
         return "Patta (Ripetizione o 50 mosse)."
     return "Partita Terminata (Patta)."
 
-# Helper per mappare le mosse legali per la UI frontend
 def get_legal_moves_map(board):
     moves_map = {}
     for move in board.legal_moves:
@@ -147,9 +165,10 @@ def get_legal_moves_map(board):
 
 @app.route("/get_state")
 def get_state():
+    _, current_eval = v.evaluate_and_order(s)
     return jsonify({
         "fen": s.board.fen(),
-        "eval": v(s),
+        "eval": current_eval,
         "game_over": s.board.is_game_over(),
         "result_text": get_game_result(s.board),
         "legal_moves": get_legal_moves_map(s.board)
@@ -157,40 +176,41 @@ def get_state():
 
 @app.route("/move_coordinates")
 def move_coordinates():
-  if not s.board.is_game_over():
-    source = int(request.args.get('from', default=''))
-    target = int(request.args.get('to', default=''))
-    promotion = True if request.args.get('promotion', default='') == 'true' else False
+    if not s.board.is_game_over():
+        source = int(request.args.get('from', default=''))
+        target = int(request.args.get('to', default=''))
+        promotion = True if request.args.get('promotion', default='') == 'true' else False
 
-    parsed_move = chess.Move(source, target, promotion=chess.QUEEN if promotion else None)
+        parsed_move = chess.Move(source, target, promotion=chess.QUEEN if promotion else None)
 
-    if parsed_move in s.board.legal_moves:
-        move_san = s.board.san(parsed_move)
-        print("human moves", move_san)
-        try:
-            s.board.push_san(move_san)
-            computer_move(s, v)
-        except Exception:
-            traceback.print_exc()
-    else:
-        print(f"Mossa ignorata dal server (illegale): {parsed_move}")
+        if parsed_move in s.board.legal_moves:
+            move_san = s.board.san(parsed_move)
+            print("human moves", move_san)
+            try:
+                s.board.push_san(move_san)
+                computer_move(s, v)
+            except Exception:
+                traceback.print_exc()
+        else:
+            print(f"Mossa ignorata dal server (illegale): {parsed_move}")
 
+        _, current_eval = v.evaluate_and_order(s)
+        return jsonify({
+          "fen": s.board.fen(),
+          "eval": current_eval,
+          "game_over": s.board.is_game_over(),
+          "result_text": get_game_result(s.board),
+          "legal_moves": get_legal_moves_map(s.board)
+        })
+
+    _, current_eval = v.evaluate_and_order(s)
     return jsonify({
-      "fen": s.board.fen(),
-      "eval": v(s),
-      "game_over": s.board.is_game_over(),
-      "result_text": get_game_result(s.board),
-      "legal_moves": get_legal_moves_map(s.board)
+        "fen": s.board.fen(),
+        "eval": current_eval,
+        "game_over": True,
+        "result_text": get_game_result(s.board),
+        "legal_moves": get_legal_moves_map(s.board)
     })
-
-  print("GAME IS OVER")
-  return jsonify({
-    "fen": s.board.fen(),
-    "eval": v(s),
-    "game_over": True,
-    "result_text": get_game_result(s.board),
-    "legal_moves": get_legal_moves_map(s.board)
-  })
 
 if __name__ == "__main__":
     app.run(debug=True)

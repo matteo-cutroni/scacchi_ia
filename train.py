@@ -408,7 +408,7 @@ def train_loop(modello, train_files, val_file, chunk_size=100000, max_positions_
     plt.plot(range(1, len(history_train) + 1), history_train, label='Train Loss', marker='o', color='blue', linewidth=2)
     plt.plot(range(1, len(history_val) + 1), history_val, label='Validation Loss', marker='s', color='red', linewidth=2, linestyle='--')
     
-    plt.title(f"Train vs Validation Loss ad Alta Risoluzione ({totale_posizioni_viste_globale:,} posizioni viste)", fontsize=14, fontweight='bold')
+    plt.title(f"Train vs Validation Loss ({totale_posizioni_viste_globale:,} posizioni viste)", fontsize=14, fontweight='bold')
     plt.xlabel("Step di Training (Shard processati)", fontsize=12)
     plt.ylabel("Loss Media", fontsize=12)
     plt.grid(True, linestyle=':', alpha=0.6)
