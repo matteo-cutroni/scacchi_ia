@@ -4,7 +4,8 @@ import chess
 import traceback
 from flask import Flask, request, jsonify
 from state import State
-from train import ChessResNet, encode_move 
+from train import ChessResNet, encode_move
+import threading
 
 
 class NeuralEvaluator():
@@ -20,8 +21,8 @@ class NeuralEvaluator():
     def evaluate_and_order(self, s):
         """
         Interroga la ResNet e restituisce:
-        1. Le mosse legali ordinate per probabilità (Policy Head)
-        2. La valutazione della posizione (Value Head)
+        1. Le mosse legali ordinate per bontà (Policy Head)
+        2. La valutazione della posizione ASSOLUTA (Value Head)
         """
         brd = s.serialize()
         board_tensor = torch.tensor(brd).float().unsqueeze(0).to(self.device)
@@ -32,6 +33,9 @@ class NeuralEvaluator():
         policy_logits = policy_logits.squeeze(0).cpu().numpy()
         value = value_eval.item()
         
+        if s.board.turn == chess.BLACK:
+            value = -value
+
         move_scores = []
         for move in s.board.legal_moves:
             idx = encode_move(move)
@@ -111,34 +115,6 @@ def computer_move(s, evaluator, depth=3):
         s.board.push(best_move)
 
 
-s = State()
-v = NeuralEvaluator("nets/mini_alphazero_p913K_d6000k.pth") 
-
-
-app = Flask(__name__)
-
-@app.route('/')
-def hello():
-    ret = open('index.html').read()
-    return ret.replace('start', s.board.fen())
-
-@app.route("/newgame")
-def newgame():
-    s.board.reset()
-    player_color = request.args.get('color', default='white')
-    if player_color == 'black':
-        computer_move(s, v)
-        
-    _, current_eval = v.evaluate_and_order(s)
-    
-    return jsonify({
-        "fen": s.board.fen(),
-        "eval": current_eval,
-        "game_over": s.board.is_game_over(),
-        "result_text": get_game_result(s.board),
-        "legal_moves": get_legal_moves_map(s.board)
-    })
-
 def get_game_result(board):
     if not board.is_game_over():
         return ""
@@ -163,6 +139,21 @@ def get_legal_moves_map(board):
         moves_map[from_sq].append(to_sq)
     return moves_map
 
+
+
+s = State()
+v = NeuralEvaluator("nets/mini_alphazero_p913K_d6000k.pth")
+game_lock = threading.Lock()
+
+
+app = Flask(__name__)
+
+
+@app.route('/')
+def hello():
+    ret = open('index.html').read()
+    return ret.replace('start', s.board.fen())
+
 @app.route("/get_state")
 def get_state():
     _, current_eval = v.evaluate_and_order(s)
@@ -174,43 +165,73 @@ def get_state():
         "legal_moves": get_legal_moves_map(s.board)
     })
 
+@app.route("/newgame")
+def newgame():
+    with game_lock:
+        s.board.reset()
+        player_color = request.args.get('color', default='white')
+        if player_color == 'black':
+            computer_move(s, v)
+            
+        _, current_eval = v.evaluate_and_order(s)
+        
+        return jsonify({
+            "fen": s.board.fen(),
+            "eval": current_eval,
+            "game_over": s.board.is_game_over(),
+            "result_text": get_game_result(s.board),
+            "legal_moves": get_legal_moves_map(s.board)
+        })
+
 @app.route("/move_coordinates")
 def move_coordinates():
-    if not s.board.is_game_over():
-        source = int(request.args.get('from', default=''))
-        target = int(request.args.get('to', default=''))
-        promotion = True if request.args.get('promotion', default='') == 'true' else False
+    with game_lock:
+        accepted = False
+        if not s.board.is_game_over():
+            source = int(request.args.get('from', default=''))
+            target = int(request.args.get('to', default=''))
+            promotion = True if request.args.get('promotion', default='') == 'true' else False
 
-        parsed_move = chess.Move(source, target, promotion=chess.QUEEN if promotion else None)
+            parsed_move = chess.Move(source, target, promotion=chess.QUEEN if promotion else None)
 
-        if parsed_move in s.board.legal_moves:
-            move_san = s.board.san(parsed_move)
-            print("human moves", move_san)
-            try:
-                s.board.push_san(move_san)
-                computer_move(s, v)
-            except Exception:
-                traceback.print_exc()
-        else:
-            print(f"Mossa ignorata dal server (illegale): {parsed_move}")
+            if parsed_move in s.board.legal_moves:
+                move_san = s.board.san(parsed_move)
+                print("Mossa umana:", move_san)
+                try:
+                    s.board.push_san(move_san)
+                    accepted = True
+                except Exception:
+                    traceback.print_exc()
+            else:
+                print(f"Mossa ignorata dal server (illegale): {parsed_move}")
 
         _, current_eval = v.evaluate_and_order(s)
         return jsonify({
-          "fen": s.board.fen(),
-          "eval": current_eval,
-          "game_over": s.board.is_game_over(),
-          "result_text": get_game_result(s.board),
-          "legal_moves": get_legal_moves_map(s.board)
+            "fen": s.board.fen(),
+            "eval": current_eval,
+            "game_over": s.board.is_game_over(),
+            "result_text": get_game_result(s.board),
+            "legal_moves": get_legal_moves_map(s.board),
+            "accepted": accepted
         })
 
-    _, current_eval = v.evaluate_and_order(s)
-    return jsonify({
-        "fen": s.board.fen(),
-        "eval": current_eval,
-        "game_over": True,
-        "result_text": get_game_result(s.board),
-        "legal_moves": get_legal_moves_map(s.board)
-    })
+@app.route("/ai_move")
+def ai_move():
+    with game_lock:
+        if not s.board.is_game_over():
+            try:
+                computer_move(s, v)
+            except Exception:
+                traceback.print_exc()
+                
+        _, current_eval = v.evaluate_and_order(s)
+        return jsonify({
+            "fen": s.board.fen(),
+            "eval": current_eval,
+            "game_over": s.board.is_game_over(),
+            "result_text": get_game_result(s.board),
+            "legal_moves": get_legal_moves_map(s.board)
+        })
 
 if __name__ == "__main__":
     app.run(debug=True)
