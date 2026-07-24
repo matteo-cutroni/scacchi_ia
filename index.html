@@ -2,7 +2,7 @@
 <html lang="it">
 <head>
     <meta charset="UTF-8">
-    <title>AI Chess</title>
+    <title>Mini-AlphaZero Engine</title>
     <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
     <style>
         body {
@@ -82,6 +82,18 @@
         button:hover { background-color: #5b6eae; }
         .btn-black { background-color: #4a4d53; }
         .btn-black:hover { background-color: #3b3e44; }
+        
+        .highlight-legal {
+            background-image: radial-gradient(rgba(20, 180, 20, 0.65) 18%, transparent 19%) !important;
+        }
+
+        .highlight-legal:has(img) {
+            background-image: radial-gradient(transparent 50%, rgba(20, 180, 20, 0.65) 52%, rgba(20, 180, 20, 0.65) 63%, transparent 65%) !important;
+        }
+
+        .highlight-source {
+            background-color: rgba(255, 255, 0, 0.4) !important;
+        }
     </style>
 </head>
 <body>
@@ -111,6 +123,7 @@
         let board = null;
         let isEngineThinking = false;
         let playerColor = 'white';
+        let legalMoves = {};
         
         const files = {'a':0, 'b':1, 'c':2, 'd':3, 'e':4, 'f':5, 'g':6, 'h':7};
         function parseSq(sq) {
@@ -121,6 +134,7 @@
 
         function updateUI(data) {
             board.position(data.fen); 
+            legalMoves = data.legal_moves || {};
             
             let evalValue = data.eval;
             let percentage = ((evalValue + 1.0) / 2.0) * 100;
@@ -133,13 +147,46 @@
             }
         }
 
+        function removeHighlights() {
+            $('#board .square-55d63').removeClass('highlight-legal highlight-source');
+        }
+
+        function showLegalMoves(square) {
+            if (isEngineThinking) return;
+            removeHighlights();
+
+            let moves = legalMoves[square];
+            if (!moves || moves.length === 0) return;
+
+            $('#board .square-' + square).addClass('highlight-source');
+
+            for (let i = 0; i < moves.length; i++) {
+                $('#board .square-' + moves[i]).addClass('highlight-legal');
+            }
+        }
+
+        $(document).on('click', '#board .square-55d63', function() {
+            let sq = $(this).attr('data-square');
+            if (!legalMoves[sq]) {
+                removeHighlights();
+            }
+        });
+
         function onDragStart(source, piece, position, orientation) {
             if (isEngineThinking) return false;
             if (playerColor === 'white' && piece.search(/^b/) !== -1) return false;
             if (playerColor === 'black' && piece.search(/^w/) !== -1) return false;
+            
+            showLegalMoves(source);
         }
 
         function onDrop(source, target, piece, newPos, oldPos, orientation) {
+
+            if (source === target) {
+                return 'snapback';
+            }
+
+            removeHighlights();
             if (isEngineThinking) return 'snapback';
 
             let from_idx = parseSq(source);
@@ -176,6 +223,7 @@
         }
 
         function newGame(color) {
+            removeHighlights();
             playerColor = color;
             board.orientation(color); 
             $('#status-box').text("Avvio partita...");

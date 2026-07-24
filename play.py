@@ -49,9 +49,13 @@ class NeuralEvaluator():
 
 
 def alpha_beta(s, evaluator, depth, alpha, beta, maximizing_player):
-    if depth == 0 or s.board.is_game_over():
+    if depth == 0 or s.board.is_game_over(claim_draw=True):
+        
         if s.board.is_checkmate():
-            return -10000 if maximizing_player else 10000
+            return -(10000 + depth) if maximizing_player else (10000 + depth)
+
+        if s.board.is_game_over(claim_draw=True):
+            return 0.0
             
         _, val = evaluator.evaluate_and_order(s)
         return val
@@ -116,7 +120,7 @@ def computer_move(s, evaluator, depth=3):
 
 
 def get_game_result(board):
-    if not board.is_game_over():
+    if not board.is_game_over(claim_draw=True):
         return ""
     if board.is_checkmate():
         winner = "il Nero" if board.turn == chess.WHITE else "il Bianco"
@@ -160,7 +164,7 @@ def get_state():
     return jsonify({
         "fen": s.board.fen(),
         "eval": current_eval,
-        "game_over": s.board.is_game_over(),
+        "game_over": s.board.is_game_over(claim_draw=True), 
         "result_text": get_game_result(s.board),
         "legal_moves": get_legal_moves_map(s.board)
     })
@@ -178,7 +182,7 @@ def newgame():
         return jsonify({
             "fen": s.board.fen(),
             "eval": current_eval,
-            "game_over": s.board.is_game_over(),
+            "game_over": s.board.is_game_over(claim_draw=True), 
             "result_text": get_game_result(s.board),
             "legal_moves": get_legal_moves_map(s.board)
         })
@@ -209,7 +213,7 @@ def move_coordinates():
         return jsonify({
             "fen": s.board.fen(),
             "eval": current_eval,
-            "game_over": s.board.is_game_over(),
+            "game_over": s.board.is_game_over(claim_draw=True), 
             "result_text": get_game_result(s.board),
             "legal_moves": get_legal_moves_map(s.board),
             "accepted": accepted
@@ -228,7 +232,7 @@ def ai_move():
         return jsonify({
             "fen": s.board.fen(),
             "eval": current_eval,
-            "game_over": s.board.is_game_over(),
+            "game_over": s.board.is_game_over(claim_draw=True), 
             "result_text": get_game_result(s.board),
             "legal_moves": get_legal_moves_map(s.board)
         })
